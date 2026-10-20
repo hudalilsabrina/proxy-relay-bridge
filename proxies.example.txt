@@ -1,0 +1,8 @@
+# Example Proxy List
+# Supports standard formats:
+# 1. http://username:password@ip:port
+# 2. ip:port:username:password
+# 3. ip:port
+
+# http://user:pass@104.207.33.129:3129
+# 104.207.33.129:3129:user:pass

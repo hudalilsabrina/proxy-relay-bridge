@@ -1,0 +1,14 @@
+[Unit]
+Description=Rotating Proxy Relay Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/proxy-relay-bridge
+ExecStart=/usr/bin/python3 /opt/proxy-relay-bridge/relay.py --port 443 --proxies /opt/proxy-relay-bridge/proxies.txt
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
