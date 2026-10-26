@@ -22,6 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger("proxy_relay")
 
 proxies = []
+UPSTREAM_TRIES = int(os.getenv("UPSTREAM_TRIES", "4"))
+CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "8"))
+HANDSHAKE_TIMEOUT = float(os.getenv("HANDSHAKE_TIMEOUT", "10"))
 
 
 def load_proxies(proxy_file: str):
@@ -80,6 +83,65 @@ async def pipe(reader, writer):
             pass
 
 
+async def _try_upstream(chosen, header_data, is_connect, client_reader, client_writer):
+    """Coba satu upstream. True kalau tunnel/forward berhasil dipasang."""
+    try:
+        up_reader, up_writer = await asyncio.wait_for(
+            asyncio.open_connection(chosen["host"], chosen["port"]),
+            timeout=CONNECT_TIMEOUT
+        )
+    except Exception:
+        return False
+
+    lines = header_data.split(b"\r\n")
+
+    if is_connect:
+        req = [lines[0]]
+        if chosen["auth"]:
+            req.append(("Proxy-Authorization: Basic " + chosen["auth"]).encode())
+        req.append(b"Proxy-Connection: Keep-Alive")
+        req.append(b"")
+        req.append(b"")
+        try:
+            up_writer.write(b"\r\n".join(req))
+            await up_writer.drain()
+            res = await asyncio.wait_for(up_reader.readuntil(b"\r\n\r\n"),
+                                         timeout=HANDSHAKE_TIMEOUT)
+        except Exception:
+            try:
+                up_writer.close()
+            except Exception:
+                pass
+            return False
+        if b" 200" not in res.split(b"\r\n")[0]:
+            try:
+                up_writer.close()
+            except Exception:
+                pass
+            return False
+        client_writer.write(res)
+        await client_writer.drain()
+    else:
+        new_headers = [l for l in lines if not l.lower().startswith(b"proxy-authorization:")]
+        if chosen["auth"]:
+            new_headers.insert(1, ("Proxy-Authorization: Basic " + chosen["auth"]).encode())
+        try:
+            up_writer.write(b"\r\n".join(new_headers) + b"\r\n\r\n")
+            await up_writer.drain()
+        except Exception:
+            try:
+                up_writer.close()
+            except Exception:
+                pass
+            return False
+
+    await asyncio.gather(
+        pipe(client_reader, up_writer),
+        pipe(up_reader, client_writer)
+    )
+    return True
+
+
 async def handle_client(client_reader, client_writer):
     try:
         header_data = await client_reader.readuntil(b"\r\n\r\n")
@@ -93,71 +155,34 @@ async def handle_client(client_reader, client_writer):
         client_writer.close()
         return
 
-    chosen = random.choice(proxies)
+    is_connect = header_data.split(b"\r\n")[0].decode(errors="ignore").startswith("CONNECT")
 
-    try:
-        upstream_reader, upstream_writer = await asyncio.wait_for(
-            asyncio.open_connection(chosen["host"], chosen["port"]),
-            timeout=8.0
-        )
-    except Exception:
-        client_writer.write(b"HTTP/1.1 504 Gateway Timeout\r\n\r\nUpstream connect failed\r\n")
-        await client_writer.drain()
-        client_writer.close()
-        return
+    tried = set()
+    for _ in range(min(UPSTREAM_TRIES, len(proxies))):
+        chosen = None
+        for _ in range(6):
+            cand = random.choice(proxies)
+            key = (cand["host"], cand["port"])
+            if key not in tried:
+                chosen = cand
+                break
+        if chosen is None:
+            chosen = random.choice(proxies)
+        tried.add((chosen["host"], chosen["port"]))
 
-    lines = header_data.split(b"\r\n")
-    first_line = lines[0].decode(errors="ignore")
-
-    if first_line.startswith("CONNECT"):
-        # HTTPS Tunneling via CONNECT
-        connect_req = [lines[0]]
-        if chosen["auth"]:
-            connect_req.append(f"Proxy-Authorization: Basic {chosen['auth']}".encode())
-        connect_req.append(b"Proxy-Connection: Keep-Alive\r\n\r\n")
-
-        upstream_writer.write(b"\r\n".join(connect_req))
-        await upstream_writer.drain()
-
-        try:
-            upstream_res = await asyncio.wait_for(upstream_reader.readuntil(b"\r\n\r\n"), timeout=10.0)
-        except Exception:
-            client_writer.write(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
-            await client_writer.drain()
-            client_writer.close()
-            upstream_writer.close()
+        if await _try_upstream(chosen, header_data, is_connect, client_reader, client_writer):
             return
 
-        client_writer.write(upstream_res)
+    try:
+        client_writer.write(b"HTTP/1.1 504 Gateway Timeout\r\n\r\nAll upstream attempts failed\r\n")
         await client_writer.drain()
-
-        if b"200" in upstream_res.split(b"\r\n")[0]:
-            await asyncio.gather(
-                pipe(client_reader, upstream_writer),
-                pipe(upstream_reader, client_writer)
-            )
-        else:
+    except Exception:
+        pass
+    finally:
+        try:
             client_writer.close()
-            upstream_writer.close()
-
-    else:
-        # Standard Plain HTTP
-        new_headers = []
-        for line in lines:
-            if line.lower().startswith(b"proxy-authorization:"):
-                continue
-            new_headers.append(line)
-
-        if chosen["auth"]:
-            new_headers.insert(1, f"Proxy-Authorization: Basic {chosen['auth']}".encode())
-
-        upstream_writer.write(b"\r\n".join(new_headers) + b"\r\n\r\n")
-        await upstream_writer.drain()
-
-        await asyncio.gather(
-            pipe(client_reader, upstream_writer),
-            pipe(upstream_reader, client_writer)
-        )
+        except Exception:
+            pass
 
 
 async def main():
