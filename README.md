@@ -1,80 +1,127 @@
-# 🚀 Proxy Relay Bridge (Rotating Port 443 / 80 Forwarder)
+# 🚀 Proxy Relay Bridge
 
-Lightweight, high-concurrency Python asyncio forward proxy bridge.
+Lightweight asyncio forward-proxy bridge with **rotation, sticky sessions, country routing, an
+ingest API and self-pruning**. Stdlib only — no pip dependencies.
 
-Designed to solve **firewall outbound port restrictions** (e.g. servers blocking all ports except `80` and `443`) and provide **automatic random rotation / load-balancing** across a pool of thousands of upstream authenticated proxies (e.g. ProxyScrape, Webshare, BrightData, residential proxies on ports like `3129`, `8080`, `10000+`).
+Built for the case where the *client* can only reach standard web ports (`80`/`443`) while the
+upstream proxies live on non-standard ports (`3129`, `8080`, `10000`, `10080`, …), and the pool
+keeps churning because trial proxies die every few hours.
 
 ---
 
 ## ⚡ Features
-- **Firewall Bypass**: Listens on standard ports (`443`, `80`, or custom) that are never blocked by cloud firewalls.
-- **Auto Rotation**: Every incoming HTTP/HTTPS request is transparently load-balanced across your proxy pool.
-- **Full HTTPS CONNECT Tunneling**: Bi-directional streaming for SSL/TLS connections without decrypting or tampering with user traffic.
-- **Multi-Format Upstream Support**:
-  - `http://user:password@ip:port`
-  - `ip:port:user:password`
-  - `ip:port`
-- **Zero Heavy Dependencies**: Built entirely with Python's standard library (`asyncio`, `urllib`). No external pip dependencies required.
-- **Ideal for AI Gateways**: Seamlessly pairs with gateways like **9router**, **LiteLLM**, **One-API**, or custom scrapers.
+
+- **Firewall bypass** — listen on `80`/`443`, forward to any upstream port.
+- **Rotating mode** — a different upstream per request.
+- **Sticky mode** — one upstream pinned per username (`sticky1`, `sticky2`, …) with TTL.
+- **Country routing** — `country-sg`, `country-us`, … picks only upstreams whose exit country matches.
+- **Per-request retry** — up to `UPSTREAM_TRIES` different upstreams before returning `504`.
+- **Hot reload** — the pool file is watched; edits apply within seconds, no restart.
+- **Ingest API** — POST proxy lists from any agent/box; JSON or plain text, optional validation.
+- **Auto-prune** — systemd timer re-tests the pool and drops dead proxies.
+- **Multi-format upstreams** — `http://user:pass@ip:port`, `ip:port:user:pass`, `ip:port`.
 
 ---
 
 ## 🛠️ Quick Start
 
-### 1. Clone & Setup
 ```bash
 git clone https://github.com/hudalilsabrina/proxy-relay-bridge.git
 cd proxy-relay-bridge
-```
-
-### 2. Prepare Your Proxy List
-Create a `proxies.txt` file and paste your proxies:
-```text
-http://user1:pass1@104.207.33.129:3129
-http://user2:pass2@104.207.33.171:3129
-# or
-104.207.33.129:3129:user1:pass1
-```
-
-### 3. Run the Relay Bridge
-```bash
+cp proxies.example.txt proxies.txt      # isi proxy kamu
 python3 relay.py --port 443 --proxies proxies.txt
 ```
-*(Note: Binding to port 443 or 80 requires root privileges on Linux).*
+
+Binding `80`/`443` requires root.
+
+### Modes (pilih lewat username proxy)
+
+| URL | Perilaku |
+|---|---|
+| `http://relay-host:80` | rotasi acak semua upstream |
+| `http://sticky1:x@relay-host:80` | IP tetap untuk lane `sticky1` (TTL `STICKY_TTL`, default 900 s) |
+| `http://country-sg:x@relay-host:80` | hanya upstream dengan exit country SG |
+| `http://sticky-country-de:x@relay-host:80` | sticky + filter negara |
+
+Kalau negara yang diminta tidak ada di pool, relay fallback ke semua upstream (tidak error).
 
 ---
 
-## 🧪 Testing Your Relay
+## 📥 Ingest API
 
-Test directly with `curl`:
+`ingest.py` menerima proxy dari mesin/agent lain dan menulisnya ke `pool.d/<tag>.txt`,
+lalu relay hot-reload sendiri.
+
 ```bash
-# Request 1 -> Egress IP A
-curl -x "http://127.0.0.1:443" https://api.ipify.org
+# JSON
+curl -X POST http://relay-host:8080/ingest \
+  -H "X-Api-Key: $INGEST_KEY" -H "Content-Type: application/json" \
+  -d '{"proxies":["http://user:pass@1.2.3.4:8080"],"tag":"agent1","mode":"append","validate":true}'
 
-# Request 2 -> Egress IP B (Rotates automatically!)
-curl -x "http://127.0.0.1:443" https://api.ipify.org
+# text/plain, satu proxy per baris
+curl -X POST http://relay-host:8080/ingest -H "X-Api-Key: $INGEST_KEY" --data-binary @list.txt
+
+curl http://relay-host:8080/health          # tanpa auth
+curl http://relay-host:8080/list -H "X-Api-Key: $INGEST_KEY"
+```
+
+| Field | Arti |
+|---|---|
+| `tag` | nama sumber → `pool.d/<tag>.txt` (bisa dicabut per sumber) |
+| `mode` | `append` (default) / `replace` |
+| `validate` | tes dulu ke `api.ipify.org`, hanya yang hidup disimpan |
+| `geo` | cari exit country tiap proxy → `countries.json` (dipakai filter `country-xx`) |
+
+Key dibuat otomatis di `ingest.key` saat pertama jalan (chmod 600, jangan di-commit).
+Default listen di **dua port**: `8787` dan `8080` (`INGEST_PORTS`), karena banyak host
+memblokir egress ke port custom.
+
+---
+
+## 🧹 Auto-prune
+
+`prune.py` mengetes semua isi `pool.d/*.txt`, membuang yang gagal, lalu rebuild `proxies.txt`.
+
+```bash
+systemctl enable --now relay-prune.timer    # tiap 10 menit
+systemctl start relay-prune.service         # prune manual
 ```
 
 ---
 
-## ⚙️ Running as a Systemd Service (Linux)
+## ⚙️ Systemd
 
-1. Copy repository to `/opt/proxy-relay-bridge`:
-   ```bash
-   sudo cp -r . /opt/proxy-relay-bridge
-   ```
-2. Copy and enable the systemd service:
-   ```bash
-   sudo cp proxy-relay.service.example /etc/systemd/system/proxy-relay.service
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now proxy-relay
-   ```
-3. Check status:
-   ```bash
-   sudo systemctl status proxy-relay
-   ```
+Unit siap pakai ada di `deploy/`:
+
+| File | Fungsi |
+|---|---|
+| `deploy/relay.service` | relay utama (contoh port 443) |
+| `deploy/relay-ingest.service` | ingest API (`8787,8080`) |
+| `deploy/relay-prune.service` + `.timer` | prune periodik |
+
+```bash
+sudo cp deploy/*.service deploy/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now relay relay-ingest relay-prune.timer
+```
+
+---
+
+## 🧪 Testing
+
+```bash
+# rotasi: IP berubah tiap request
+curl -x http://127.0.0.1:443 https://api.ipify.org
+
+# sticky: IP sama terus
+for i in 1 2 3; do curl -x http://sticky1:x@127.0.0.1:443 https://api.ipify.org; done
+
+# country routing
+curl -x http://country-sg:x@127.0.0.1:80 https://ipinfo.io/json
+```
 
 ---
 
 ## 📄 License
-MIT License. Open source and free for public use.
+
+MIT.

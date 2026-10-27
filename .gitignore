@@ -1,5 +1,7 @@
-proxies.txt
-*.log
 __pycache__/
-.venv/
-.env
+*.pyc
+proxies.txt
+pool.d/
+countries.json
+*.key
+ingest.key

@@ -1,0 +1,15 @@
+[Unit]
+Description=Rotating Proxy Relay Bridge
+After=network.target
+
+[Service]
+Type=simple
+# ganti PORT dan path sesuai kebutuhan (443 = pool utama, 80 = pool kedua)
+ExecStart=/usr/bin/python3 /opt/proxy-relay-bridge/relay.py --port 443 --proxies /opt/proxy-relay-bridge/proxies.txt
+Environment=UPSTREAM_TRIES=4
+Environment=STICKY_TTL=900
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

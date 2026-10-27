@@ -1,0 +1,6 @@
+[Unit]
+Description=Prune relay pool (buang proxy mati)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/mrscraper-relay/prune.py

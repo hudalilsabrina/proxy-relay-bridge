@@ -1,0 +1,10 @@
+[Unit]
+Description=Jalankan prune pool tiap 10 menit
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+Unit=relay-prune.service
+
+[Install]
+WantedBy=timers.target
