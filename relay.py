@@ -27,6 +27,9 @@ proxies = []
 UPSTREAM_TRIES = int(os.getenv("UPSTREAM_TRIES", "4"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "8"))
 HANDSHAKE_TIMEOUT = float(os.getenv("HANDSHAKE_TIMEOUT", "10"))
+# Parent proxy (opsional): semua koneksi ke upstream dilewatkan ke sini dulu.
+# Dipakai kalau IP server diblokir gateway upstream (mis. FloppyData menutup :10080 untuk IP kita).
+PARENT_PROXY = os.getenv("PARENT_PROXY", "").strip()
 STICKY_TTL = int(os.getenv("STICKY_TTL", "900"))   # detik; sesi sticky kedaluwarsa kalau idle
 _sticky = {}   # key -> (index upstream, last_seen)
 _countries = {}   # proxy url -> "sg"/"us"/...
@@ -178,15 +181,53 @@ def pick_upstream(user, tried):
     return random.choice(pool)
 
 
-async def _try_upstream(chosen, header_data, is_connect, client_reader, client_writer):
-    """Coba satu upstream. True kalau tunnel/forward berhasil dipasang."""
+async def _open_via_parent(host, port):
+    """Buka tunnel TCP ke host:port lewat PARENT_PROXY (HTTP CONNECT)."""
+    pu = urlparse(PARENT_PROXY if "://" in PARENT_PROXY else "http://" + PARENT_PROXY)
     try:
-        up_reader, up_writer = await asyncio.wait_for(
-            asyncio.open_connection(chosen["host"], chosen["port"]),
+        r, w = await asyncio.wait_for(
+            asyncio.open_connection(pu.hostname, pu.port or 80),
             timeout=CONNECT_TIMEOUT
         )
     except Exception:
-        return False
+        return None
+    req = [f"CONNECT {host}:{port} HTTP/1.1".encode(),
+           f"Host: {host}:{port}".encode()]
+    if pu.username:
+        cred = base64.b64encode(f"{pu.username}:{pu.password or ''}".encode()).decode()
+        req.append(f"Proxy-Authorization: Basic {cred}".encode())
+    req += [b"Proxy-Connection: Keep-Alive", b"", b""]
+    try:
+        w.write(b"\r\n".join(req))
+        await w.drain()
+        res = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), timeout=HANDSHAKE_TIMEOUT)
+        if b" 200" not in res.split(b"\r\n")[0]:
+            w.close()
+            return None
+    except Exception:
+        try:
+            w.close()
+        except Exception:
+            pass
+        return None
+    return r, w
+
+
+async def _try_upstream(chosen, header_data, is_connect, client_reader, client_writer):
+    """Coba satu upstream. True kalau tunnel/forward berhasil dipasang."""
+    if PARENT_PROXY:
+        conn = await _open_via_parent(chosen["host"], chosen["port"])
+        if not conn:
+            return False
+        up_reader, up_writer = conn
+    else:
+        try:
+            up_reader, up_writer = await asyncio.wait_for(
+                asyncio.open_connection(chosen["host"], chosen["port"]),
+                timeout=CONNECT_TIMEOUT
+            )
+        except Exception:
+            return False
 
     lines = header_data.split(b"\r\n")
 

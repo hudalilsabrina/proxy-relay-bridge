@@ -20,6 +20,8 @@ import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+import chain
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -86,6 +88,9 @@ def rebuild() -> int:
 def geo_lookup(proxies: list, timeout: int = 20) -> dict:
     """Cari negara tiap proxy (dipakai filter country-xx di relay)."""
     def one(p):
+        if chain.PARENT_PROXY:
+            cc, ip = chain.geo(p, timeout=timeout)
+            return p, cc, ip or ""
         try:
             out = subprocess.run(["curl", "-s", "-m", str(timeout), "-x", p,
                                   "https://ipinfo.io/json"],
@@ -119,6 +124,9 @@ def save_geo(found: dict) -> int:
 
 def validate(proxies: list, timeout: int = 20) -> list:
     def check(p):
+        if chain.PARENT_PROXY:
+            ok, _ip, _err = chain.check(p, timeout=timeout)
+            return p if ok else None
         try:
             out = subprocess.run(["curl", "-s", "-m", str(timeout), "-x", p,
                                   "http://api.ipify.org", "-w", "|%{http_code}"],
