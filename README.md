@@ -41,9 +41,17 @@ Binding `80`/`443` requires root.
 | `http://relay-host:80` | rotasi acak semua upstream |
 | `http://sticky1:x@relay-host:80` | IP tetap untuk lane `sticky1` (TTL `STICKY_TTL`, default 900 s) |
 | `http://country-sg:x@relay-host:80` | hanya upstream dengan exit country SG |
+| `http://strict-country-sg:x@relay-host:80` | sama, tapi **502** kalau negara itu tidak ada di pool (tidak fallback) |
 | `http://sticky-country-de:x@relay-host:80` | sticky + filter negara |
 
-Kalau negara yang diminta tidak ada di pool, relay fallback ke semua upstream (tidak error).
+Kalau negara yang diminta tidak ada di pool, mode `country-xx` fallback ke semua upstream
+(tidak error), sedangkan `strict-country-xx` menolak dengan `502` — pakai yang strict kalau
+hasil scraping tidak boleh keluar dari negara target.
+
+> Catatan: `countries.json` **harus** ber-key URL proxy (`http://user:pass@host:port`),
+> karena `relay.py` mem-parse setiap key sebagai URL. Key `host:port|base64` akan membuat
+> peta terbaca 0 entri dan filter negara diam-diam mati. `prune.py` sudah otomatis
+> me-refresh peta ini setiap kali prune jalan.
 
 ---
 
