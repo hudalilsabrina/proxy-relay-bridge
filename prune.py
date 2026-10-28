@@ -26,6 +26,33 @@ def check(p):
         return p, False
 
 
+GEO_FILE = os.path.join(BASE, "countries.json")
+
+
+def refresh_geo(pool):
+    """Ukur ulang negara keluar tiap proxy hidup, lalu tulis countries.json
+    dengan key = URL proxy (format yang dibaca relay.py)."""
+    def one(p):
+        try:
+            out = subprocess.run(["curl", "-s", "-m", str(TIMEOUT), "-x", p,
+                                  "https://ipinfo.io/json"],
+                                 capture_output=True, text=True, timeout=TIMEOUT + 8).stdout
+            d = json.loads(out) if out.strip().startswith("{") else {}
+            return p, (d.get("country") or "").lower()
+        except Exception:
+            return p, ""
+
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        found = {p: cc for p, cc in ex.map(one, pool) if cc}
+    if not found:
+        return 0
+    tmp = GEO_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(found, f, indent=0)
+    os.replace(tmp, GEO_FILE)
+    return len(found)
+
+
 def main():
     total = live_total = 0
     for fn in sorted(os.listdir(POOL_DIR)):
@@ -53,11 +80,13 @@ def main():
                 if l and not l.startswith("#") and l not in seen:
                     seen.add(l)
                     pool.append(l)
-    tmp = POOL_FILE + ".tmp"
+    geo_n = refresh_geo(pool)          # tulis peta negara DULU, baru proxies.txt
+    tmp = POOL_FILE + ".tmp"           # supaya hot-reload relay membaca keduanya segar
     with open(tmp, "w") as f:
         f.write("\n".join(pool) + ("\n" if pool else ""))
     os.replace(tmp, POOL_FILE)
-    print(json.dumps({"ok": True, "checked": total, "live": live_total, "pool_size": len(pool)}))
+    print(json.dumps({"ok": True, "checked": total, "live": live_total,
+                      "pool_size": len(pool), "geo": geo_n}))
 
 
 if __name__ == "__main__":

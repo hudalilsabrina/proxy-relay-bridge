@@ -151,9 +151,12 @@ def pick_upstream(user, tried):
         m = _re.search(r"(?:country|c)-([a-zA-Z]{2})\b", user)
         if m:
             cc = m.group(1).lower()
+    strict = bool(user) and "strict" in user.lower()
     pool = [p for p in proxies if _country_of(p) == cc] if cc else proxies
     if not pool:
-        pool = proxies   # negara itu belum ada di pool -> fallback semua
+        if strict and cc:
+            return None      # strict-country-xx: jangan diam-diam ganti negara
+        pool = proxies       # negara itu belum ada di pool -> fallback semua
     if user and user.lower().startswith("sticky"):
         now = time.time()
         ent = _sticky.get(user)
@@ -242,7 +245,7 @@ async def handle_client(client_reader, client_writer):
         return
 
     if not proxies:
-        client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\nNo upstream proxies available\r\n")
+        client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\nNo upstream proxies available (strict-country: negara tidak ada di pool)\r\n")
         await client_writer.drain()
         client_writer.close()
         return
@@ -251,9 +254,11 @@ async def handle_client(client_reader, client_writer):
     user = client_username(header_data)
 
     tried = set()
+    rejected = False
     for _ in range(min(UPSTREAM_TRIES, len(proxies))):
         chosen = pick_upstream(user, tried)
         if chosen is None:
+            rejected = True     # strict-country & negara kosong
             break
         tried.add((chosen["host"], chosen["port"]))
 
@@ -261,7 +266,11 @@ async def handle_client(client_reader, client_writer):
             return
 
     try:
-        client_writer.write(b"HTTP/1.1 504 Gateway Timeout\r\n\r\nAll upstream attempts failed\r\n")
+        if rejected and not tried:
+            client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n"
+                                b"strict-country: tidak ada proxy untuk negara itu di pool\r\n")
+        else:
+            client_writer.write(b"HTTP/1.1 504 Gateway Timeout\r\n\r\nAll upstream attempts failed\r\n")
         await client_writer.drain()
     except Exception:
         pass
