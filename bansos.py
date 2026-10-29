@@ -61,18 +61,47 @@ def probe(item):
     return {"proxy": url, "country": cc, "exit_ip": ip}
 
 
+def load_from_pool():
+    """Mode cepat: pakai pool yang sudah divalidasi prune + label dari countries.json.
+    Tanpa request jaringan, jadi tetap cepat walau pool ribuan proxy."""
+    items = {}
+    pdir = os.path.join(BASE, "pool.d")
+    try:
+        for fn in sorted(os.listdir(pdir)):
+            if fn.endswith(".txt"):
+                for l in open(os.path.join(pdir, fn)):
+                    l = l.strip()
+                    if l and not l.startswith("#"):
+                        items.setdefault(l, "")
+    except Exception:
+        pass
+    geo = {}
+    try:
+        geo = json.load(open(os.path.join(BASE, "countries.json"))) or {}
+    except Exception:
+        pass
+    return [{"proxy": u, "country": (geo.get(u) or "").upper(), "exit_ip": None} for u in items]
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    creds = load_candidates()
-    print(f"[bansos] kandidat: {len(creds)} kredensial (chain={'ON' if chain.PARENT_PROXY else 'OFF'})", flush=True)
+    verify = os.getenv("BANSOS_VERIFY", "0") == "1"
 
-    alive = []
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        for i, r in enumerate(ex.map(probe, creds.items()), 1):
-            if r:
-                alive.append(r)
-            if i % 50 == 0:
-                print(f"[bansos] {i}/{len(creds)} — hidup {len(alive)}", flush=True)
+    if not verify:
+        alive = load_from_pool()
+        print(f"[bansos] mode cepat (pool terverifikasi): {len(alive)} proxy", flush=True)
+        creds = {a["proxy"]: a["country"] for a in alive}
+    else:
+        creds = load_candidates()
+        print(f"[bansos] kandidat: {len(creds)} kredensial (chain={'ON' if chain.PARENT_PROXY else 'OFF'})", flush=True)
+
+        alive = []
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            for i, r in enumerate(ex.map(probe, creds.items()), 1):
+                if r:
+                    alive.append(r)
+                if i % 50 == 0:
+                    print(f"[bansos] {i}/{len(creds)} — hidup {len(alive)}", flush=True)
 
     alive.sort(key=lambda x: (x["country"] or "ZZ", x["proxy"]))
 
