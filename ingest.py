@@ -102,7 +102,7 @@ def geo_lookup(proxies: list, timeout: int = 20) -> dict:
             return p, "", ""
 
     found = {}
-    with ThreadPoolExecutor(max_workers=15) as ex:
+    with ThreadPoolExecutor(max_workers=VAL_WORKERS) as ex:
         for p, cc, _ip in ex.map(one, proxies):
             if cc:
                 found[p] = cc
@@ -122,6 +122,9 @@ def save_geo(found: dict) -> int:
     return len(cur)
 
 
+VAL_WORKERS = int(os.getenv("INGEST_VAL_WORKERS", "6"))
+
+
 def validate(proxies: list, timeout: int = 20) -> list:
     def check(p):
         if chain.PARENT_PROXY:
@@ -136,7 +139,7 @@ def validate(proxies: list, timeout: int = 20) -> list:
         except Exception:
             return None
 
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=VAL_WORKERS) as ex:
         return [p for p in ex.map(check, proxies) if p]
 
 

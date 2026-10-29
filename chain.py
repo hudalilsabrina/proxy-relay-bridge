@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 PARENT_PROXY = os.getenv("PARENT_PROXY", "").strip()
 DEFAULT_TIMEOUT = float(os.getenv("CHAIN_TIMEOUT", "15"))
+CHAIN_ATTEMPTS = int(os.getenv("CHAIN_ATTEMPTS", "4"))
 
 
 def _parent_addr():
@@ -46,7 +47,7 @@ def _parent_connect(host, port, timeout):
     return s
 
 
-def open_tunnel(host, port, timeout=DEFAULT_TIMEOUT, attempts=4):
+def open_tunnel(host, port, timeout=DEFAULT_TIMEOUT, attempts=None):
     """Buka socket ke host:port.
 
     Tanpa PARENT_PROXY: koneksi langsung.
@@ -54,6 +55,7 @@ def open_tunnel(host, port, timeout=DEFAULT_TIMEOUT, attempts=4):
     yang berputar (relay datacenter) sebagian menolak port non-standar seperti 10080.
     Kalau semua percobaan via parent gagal, coba koneksi langsung sebagai fallback.
     """
+    attempts = attempts or CHAIN_ATTEMPTS
     if not PARENT_PROXY:
         return socket.create_connection((host, port), timeout=timeout)
 
