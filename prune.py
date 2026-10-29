@@ -24,6 +24,9 @@ GEO_FILE = os.path.join(BASE, "countries.json")
 TIMEOUT = int(os.getenv("PRUNE_TIMEOUT", "20"))
 WORKERS = int(os.getenv("PRUNE_WORKERS", "5"))
 MIN_ALIVE_RATIO = float(os.getenv("PRUNE_MIN_ALIVE_RATIO", "0.3"))
+# Pool besar (puluhan ribu): cek sebagian saja tiap run, sisanya dibiarkan.
+# 0 = cek semua.
+SAMPLE = int(os.getenv("PRUNE_SAMPLE", "0"))
 
 
 def _attempt(p):
@@ -48,8 +51,14 @@ def check(p):
 
 
 def refresh_geo(pool):
-    """Ukur ulang negara keluar tiap proxy hidup, lalu tulis countries.json
-    dengan key = URL proxy (format yang dibaca relay.py)."""
+    """Label negara untuk proxy yang BELUM ada di countries.json saja,
+    lalu gabungkan dengan peta lama (biar pool besar tidak dilabel ulang semua)."""
+    try:
+        cur = json.load(open(GEO_FILE)) or {}
+    except Exception:
+        cur = {}
+    todo = [p for p in pool if p not in cur]
+
     def one(p):
         if chain.PARENT_PROXY:
             cc, _ip = chain.geo(p, timeout=TIMEOUT)
@@ -64,9 +73,10 @@ def refresh_geo(pool):
             return p, ""
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        found = {p: cc for p, cc in ex.map(one, pool) if cc}
+        found = {p: cc for p, cc in ex.map(one, todo) if cc}
     if not found:
         return 0
+    found = {**cur, **found}
     tmp = GEO_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(found, f, indent=0)
@@ -86,23 +96,34 @@ def main():
         if not lines:
             continue
 
-        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            results = list(ex.map(check, lines))
-        live = [p for p, ok in results if ok]
+        # Pool besar: cek sampel saja, sisanya dibiarkan apa adanya.
+        if SAMPLE and len(lines) > SAMPLE:
+            check_list = random.sample(lines, SAMPLE)
+            unchecked = [p for p in lines if p not in set(check_list)]
+        else:
+            check_list = lines
+            unchecked = []
 
-        if len(lines) >= 10 and len(live) / len(lines) < MIN_ALIVE_RATIO:
-            print(f"ABORT {fn}: hanya {len(live)}/{len(lines)} hidup "
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            results = list(ex.map(check, check_list))
+        live_checked = [p for p, ok in results if ok]
+        dead_n = len(check_list) - len(live_checked)
+
+        if len(check_list) >= 10 and len(live_checked) / len(check_list) < MIN_ALIVE_RATIO:
+            print(f"ABORT {fn}: hanya {len(live_checked)}/{len(check_list)} hidup "
                   f"(<{MIN_ALIVE_RATIO:.0%}) — kemungkinan gateway rate-limit, "
                   f"file TIDAK diubah", flush=True)
             abort = True
             break
 
-        total += len(lines)
-        live_total += len(live)
-        if len(live) != len(lines):
+        live = unchecked + live_checked
+        total += len(check_list)
+        live_total += len(live_checked)
+        if dead_n:
             with open(path, "w") as f:
                 f.write("\n".join(live) + ("\n" if live else ""))
-        print(f"{fn:24} {len(live):4}/{len(lines):<4} hidup", flush=True)
+        extra = f" (sampel {len(check_list)}/{len(lines)})" if unchecked else ""
+        print(f"{fn:24} {len(live_checked):4}/{len(check_list):<4} hidup{extra}", flush=True)
 
     if abort:
         print(json.dumps({"ok": False, "aborted": True, "reason": "mass failure (rate-limit?)"}))

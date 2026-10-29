@@ -8,6 +8,7 @@ merotasi request secara acak (load balancing) ke ribuan upstream proxy (misal po
 import argparse
 import asyncio
 import base64
+import gc
 import json
 import logging
 import os
@@ -24,6 +25,8 @@ logging.basicConfig(
 logger = logging.getLogger("proxy_relay")
 
 proxies = []
+_REQ_COUNT = 0
+GC_EVERY = int(os.getenv("GC_EVERY", "10"))
 UPSTREAM_TRIES = int(os.getenv("UPSTREAM_TRIES", "4"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "8"))
 HANDSHAKE_TIMEOUT = float(os.getenv("HANDSHAKE_TIMEOUT", "10"))
@@ -213,19 +216,23 @@ async def _open_via_parent(host, port):
     return r, w
 
 
-async def _try_upstream(chosen, header_data, is_connect, client_reader, client_writer):
+async def _try_upstream(chosen, header_data, is_connect, client_reader, client_writer, opened=None):
     """Coba satu upstream. True kalau tunnel/forward berhasil dipasang."""
     if PARENT_PROXY:
         conn = await _open_via_parent(chosen["host"], chosen["port"])
         if not conn:
             return False
         up_reader, up_writer = conn
+        if opened is not None:
+            opened.append(up_writer)
     else:
         try:
             up_reader, up_writer = await asyncio.wait_for(
                 asyncio.open_connection(chosen["host"], chosen["port"]),
                 timeout=CONNECT_TIMEOUT
             )
+            if opened is not None:
+                opened.append(up_writer)
         except Exception:
             return False
 
@@ -295,6 +302,7 @@ async def handle_client(client_reader, client_writer):
     user = client_username(header_data)
 
     tried = set()
+    opened = []
     rejected = False
     for _ in range(min(UPSTREAM_TRIES, len(proxies))):
         chosen = pick_upstream(user, tried)
@@ -303,7 +311,7 @@ async def handle_client(client_reader, client_writer):
             break
         tried.add((chosen["host"], chosen["port"]))
 
-        if await _try_upstream(chosen, header_data, is_connect, client_reader, client_writer):
+        if await _try_upstream(chosen, header_data, is_connect, client_reader, client_writer, opened):
             return
 
     try:
@@ -316,6 +324,16 @@ async def handle_client(client_reader, client_writer):
     except Exception:
         pass
     finally:
+        global _REQ_COUNT
+        _REQ_COUNT += 1
+        for w in opened:            # cegah kebocoran FD saat retry gagal
+            try:
+                w.close()
+            except Exception:
+                pass
+        if GC_EVERY and _REQ_COUNT % GC_EVERY == 0:
+            # transport dari open_connection yang dibatalkan (timeout) baru dilepas GC
+            gc.collect()
         try:
             client_writer.close()
         except Exception:
