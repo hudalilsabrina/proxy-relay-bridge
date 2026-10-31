@@ -55,6 +55,31 @@ hasil scraping tidak boleh keluar dari negara target.
 
 ---
 
+## 🔐 Client Auth (wajib kalau bind publik)
+
+`relay.py` tidak punya auth bawaan, jadi **kalau `RELAY_HOST=0.0.0.0` kamu HARUS set `RELAY_AUTH`**:
+
+```bash
+# /etc/default/proxy-relay
+RELAY_HOST=0.0.0.0
+RELAY_PORT=8443
+RELAY_AUTH=rahasia-kuat-disini     # password; username bebas (dipakai utk lane)
+```
+
+| `RELAY_AUTH` | Perilaku |
+|---|---|
+| *(kosong)* | Tanpa auth — aman HANYA untuk bind `127.0.0.1` |
+| `password` | Klien wajib kirim `Proxy-Authorization: Basic <bebas>:password`; username tetap bebas untuk lane (`sticky1`, `country-us`, …) |
+| `user:password` | Wajib persis `user:password` tersebut; lane tidak bisa dipilih |
+
+Kredensial dicek dengan `hmac.compare_digest` (timing-safe). Tanpa/salah password → `407 Proxy Authentication Required`.
+
+```bash
+curl -x http://anyuser:rahasia-kuat-disini@relay-host:8443 https://api.ipify.org
+```
+
+---
+
 ## 📥 Ingest API
 
 `ingest.py` menerima proxy dari mesin/agent lain dan menulisnya ke `pool.d/<tag>.txt`,

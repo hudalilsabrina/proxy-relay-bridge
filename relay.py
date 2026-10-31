@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import base64
 import gc
+import hmac
 import json
 import logging
 import os
@@ -34,6 +35,12 @@ HANDSHAKE_TIMEOUT = float(os.getenv("HANDSHAKE_TIMEOUT", "10"))
 # Dipakai kalau IP server diblokir gateway upstream (mis. FloppyData menutup :10080 untuk IP kita).
 PARENT_PROXY = os.getenv("PARENT_PROXY", "").strip()
 STICKY_TTL = int(os.getenv("STICKY_TTL", "900"))   # detik; sesi sticky kedaluwarsa kalau idle
+# Autentikasi klien (wajib kalau bind ke 0.0.0.0).
+#   RELAY_AUTH="rahasia123"       -> klien boleh pakai username apa pun + password "rahasia123"
+#                                    (username dipakai untuk lane: sticky1, country-us, dst)
+#   RELAY_AUTH="user:rahasia123"  -> wajib persis user:pass tersebut (lane tidak bisa dipilih)
+#   kosong                        -> tanpa auth (aman HANYA untuk bind 127.0.0.1)
+RELAY_AUTH = os.getenv("RELAY_AUTH", "").strip()
 _sticky = {}   # key -> (index upstream, last_seen)
 _countries = {}   # proxy url -> "sg"/"us"/...
 _country_path = ""
@@ -123,16 +130,36 @@ async def pipe(reader, writer):
 
 def client_username(header_data: bytes):
     """Ambil username dari header Proxy-Authorization klien (kalau ada)."""
+    creds = client_creds(header_data)
+    return creds[0] if creds else None
+
+
+def client_creds(header_data: bytes):
+    """Ambil (username, password) dari header Proxy-Authorization Basic klien."""
     for line in header_data.split(b"\r\n"):
         if line.lower().startswith(b"proxy-authorization:"):
             val = line.split(b":", 1)[1].strip()
             if val.lower().startswith(b"basic "):
                 try:
                     dec = base64.b64decode(val[6:]).decode(errors="ignore")
-                    return dec.split(":")[0]
+                    user, _, pwd = dec.partition(":")
+                    return user, pwd
                 except Exception:
                     return None
     return None
+
+
+def auth_ok(creds) -> bool:
+    """Cek kredensial klien terhadap RELAY_AUTH."""
+    if not RELAY_AUTH:
+        return True                     # auth dimatikan eksplisit
+    if not creds:
+        return False
+    user, pwd = creds
+    if ":" in RELAY_AUTH:
+        exp_user, _, exp_pwd = RELAY_AUTH.partition(":")
+        return hmac.compare_digest(user, exp_user) and hmac.compare_digest(pwd, exp_pwd)
+    return hmac.compare_digest(pwd, RELAY_AUTH)
 
 
 def _country_of(entry):
@@ -167,8 +194,11 @@ def pick_upstream(user, tried):
         now = time.time()
         ent = _sticky.get(user)
         if ent and now - ent[1] < STICKY_TTL:
-            _sticky[user] = (ent[0], now)
-            return pool[ent[0] % len(pool)]
+            cand = pool[ent[0] % len(pool)]
+            if (cand["host"], cand["port"]) not in tried:
+                _sticky[user] = (ent[0], now)
+                return cand
+            # pinned upstream sudah dicoba & gagal di request ini -> re-pin di bawah
         for _ in range(10):
             idx = random.randrange(len(pool))
             key = (pool[idx]["host"], pool[idx]["port"])
@@ -289,6 +319,17 @@ async def handle_client(client_reader, client_writer):
     try:
         header_data = await client_reader.readuntil(b"\r\n\r\n")
     except Exception:
+        client_writer.close()
+        return
+
+    if not auth_ok(client_creds(header_data)):
+        try:
+            client_writer.write(b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                                b"Proxy-Authenticate: Basic realm=\"relay\"\r\n"
+                                b"Content-Length: 0\r\n\r\n")
+            await client_writer.drain()
+        except Exception:
+            pass
         client_writer.close()
         return
 
